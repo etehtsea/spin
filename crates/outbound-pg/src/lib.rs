@@ -1,9 +1,10 @@
 use anyhow::anyhow;
 use outbound_pg::*;
+use std::{collections::HashMap, sync::Mutex};
 use tokio_postgres::{
     tls::NoTlsStream,
     types::{ToSql, Type},
-    Connection, NoTls, Row, Socket,
+    Client, Connection, NoTls, Row, Socket,
 };
 
 pub use outbound_pg::add_to_linker;
@@ -16,8 +17,9 @@ use wit_bindgen_wasmtime::{async_trait, wasmtime::Linker};
 wit_bindgen_wasmtime::export!({paths: ["../../wit/ephemeral/outbound-pg.wit"], async: *});
 
 /// A simple implementation to support outbound pg connection
-#[derive(Default, Clone)]
-pub struct OutboundPg;
+pub struct OutboundPg {
+    pub connections: HashMap<String, Client>,
+}
 
 impl HostComponent for OutboundPg {
     type State = Self;
@@ -33,7 +35,9 @@ impl HostComponent for OutboundPg {
         &self,
         _component: &spin_manifest::CoreComponent,
     ) -> anyhow::Result<Self::State> {
-        Ok(Self)
+        let connections = std::collections::HashMap::new();
+
+        Ok(Self { connections })
     }
 }
 
@@ -45,19 +49,16 @@ impl outbound_pg::OutboundPg for OutboundPg {
         statement: &str,
         params: Vec<ParameterValue<'_>>,
     ) -> Result<u64, PgError> {
-        let (client, connection) = tokio_postgres::connect(address, NoTls)
-            .await
-            .map_err(|e| PgError::ConnectionFailed(format!("{:?}", e)))?;
-
-        spawn(connection);
-
         let params: Vec<&(dyn ToSql + Sync)> = params
             .iter()
             .map(to_sql_parameter)
             .collect::<anyhow::Result<Vec<_>>>()
             .map_err(|e| PgError::ValueConversionFailed(format!("{:?}", e)))?;
 
-        let nrow = client
+        let nrow = self
+            .get_client(address)
+            .await
+            .map_err(|e| PgError::ConnectionFailed(format!("{:?}", e)))?
             .execute(statement, params.as_slice())
             .await
             .map_err(|e| PgError::QueryFailed(format!("{:?}", e)))?;
@@ -71,19 +72,16 @@ impl outbound_pg::OutboundPg for OutboundPg {
         statement: &str,
         params: Vec<ParameterValue<'_>>,
     ) -> Result<RowSet, PgError> {
-        let (client, connection) = tokio_postgres::connect(address, NoTls)
-            .await
-            .map_err(|e| PgError::ConnectionFailed(format!("{:?}", e)))?;
-
-        spawn(connection);
-
         let params: Vec<&(dyn ToSql + Sync)> = params
             .iter()
             .map(to_sql_parameter)
             .collect::<anyhow::Result<Vec<_>>>()
             .map_err(|e| PgError::BadParameter(format!("{:?}", e)))?;
 
-        let results = client
+        let results = self
+            .get_client(address)
+            .await
+            .map_err(|e| PgError::ConnectionFailed(format!("{:?}", e)))?
             .query(statement, params.as_slice())
             .await
             .map_err(|e| PgError::QueryFailed(format!("{:?}", e)))?;
@@ -246,10 +244,24 @@ fn convert_entry(row: &Row, index: usize) -> Result<DbValue, tokio_postgres::Err
     Ok(value)
 }
 
-fn spawn(connection: Connection<Socket, NoTlsStream>) {
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            tracing::warn!("Postgres connection error: {}", e);
-        }
-    });
+impl OutboundPg {
+    async fn get_client(&mut self, address: &str) -> anyhow::Result<&Client> {
+        let client = self.build_client(address).await?;
+
+        Ok(&*self.connections.entry(address.to_owned()).or_insert_with(|| client))
+    }
+
+    async fn build_client(&mut self, address: &str) -> anyhow::Result<Client> {
+        println!("Build new connection: {}", address);
+
+        let (client, connection) = tokio_postgres::connect(address, NoTls).await?;
+
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                tracing::warn!("Postgres connection error: {}", e);
+            }
+        });
+
+        Ok(client)
+    }
 }

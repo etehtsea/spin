@@ -13,6 +13,7 @@ spin-engine = { path = "../engine" }
 spin-manifest = { path = "../manifest" }
 tokio = { version = "1", features = [ "rt-multi-thread" ] }
 tracing = { version = "0.1", features = [ "log" ] }
+futures = "0.3"
 
 [dependencies.wit-bindgen-wasmtime]
 git = "https://github.com/bytecodealliance/wit-bindgen"

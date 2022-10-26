@@ -77,6 +77,7 @@ default = []
 e2e-tests = []
 outbound-redis-tests = []
 outbound-pg-tests = []
+outbound-mysql-tests = []
 
 [workspace]
 members = [
